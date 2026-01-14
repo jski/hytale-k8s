@@ -14,21 +14,23 @@ on:
         default: false
 
 jobs:
-  plan:
+  build-and-publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-    outputs:
-      build: ${{ steps.should_build.outputs.build }}
-      version: ${{ steps.upstream.outputs.version }}
-      version_tag: ${{ steps.tags.outputs.version_tag }}
-      timestamp_tag: ${{ steps.tags.outputs.timestamp_tag }}
+      contents: write
+      packages: write
     env:
       HOME: /home/runner
       XDG_CONFIG_HOME: /home/runner/.config
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          df -h
 
       - name: Download Hytale downloader tool
         shell: bash
@@ -94,64 +96,8 @@ jobs:
             echo "Version changed: ${{ steps.current.outputs.version || 'none' }} -> ${{ steps.upstream.outputs.version }}"
           fi
 
-      - name: Generate tags
-        id: tags
-        shell: bash
-        run: |
-          version="${{ steps.upstream.outputs.version }}"
-          timestamp=$(date -u +%Y%m%d-%H%M%S)
-          echo "version_tag=v${version}" >> "$GITHUB_OUTPUT"
-          echo "timestamp_tag=build-${timestamp}" >> "$GITHUB_OUTPUT"
-
-  build-image:
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.build == 'true'
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      matrix:
-        include:
-          - platform: linux/amd64
-            suffix: amd64
-          - platform: linux/arm64
-            suffix: arm64
-    env:
-      HOME: /home/runner
-      XDG_CONFIG_HOME: /home/runner/.config
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Hytale downloader tool
-        shell: bash
-        run: |
-          curl -fsSL "https://downloader.hytale.com/hytale-downloader.zip" -o hytale-downloader.zip
-          unzip -q hytale-downloader.zip
-          chmod +x hytale-downloader-linux-amd64
-
-      - name: Setup OAuth credentials
-        shell: bash
-        run: |
-          echo "Using HOME=${HOME}"
-          if [ -n "${{ secrets.HYTALE_DOWNLOADER_CREDENTIALS_B64 }}" ]; then
-            echo "${{ secrets.HYTALE_DOWNLOADER_CREDENTIALS_B64 }}" | base64 -d > ~/.hytale-downloader-credentials.json
-            echo "Using base64 credential secret"
-          else
-            echo "::error::No downloader credentials provided"
-            exit 1
-          fi
-
-          chmod 600 ~/.hytale-downloader-credentials.json
-          mkdir -p ~/.config/hytale-downloader ~/.hytale-downloader
-          cp ~/.hytale-downloader-credentials.json ~/.config/hytale-downloader/credentials.json
-          cp ~/.hytale-downloader-credentials.json ~/.hytale-downloader/credentials.json
-          cp ~/.hytale-downloader-credentials.json "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json"
-          mkdir -p "${GITHUB_WORKSPACE}/.config/hytale-downloader"
-          cp ~/.hytale-downloader-credentials.json "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json"
-
       - name: Download server files
+        if: steps.should_build.outputs.build == 'true'
         shell: bash
         run: |
           echo "Using HOME=${HOME}"
@@ -165,6 +111,7 @@ jobs:
           cd ..
 
       - name: Extract and prepare server files
+        if: steps.should_build.outputs.build == 'true'
         shell: bash
         run: |
           mkdir -p stage package
@@ -174,90 +121,69 @@ jobs:
           cp "$(find stage -name 'HytaleServer.jar' -type f)" package/HytaleServer.jar
           cp "$(find stage -name 'HytaleServer.aot' -type f)" package/HytaleServer.aot
           cp server/Dockerfile package/Dockerfile
+          rm -rf stage output
+
+      - name: Generate tags
+        if: steps.should_build.outputs.build == 'true'
+        id: tags
+        shell: bash
+        run: |
+          version="${{ steps.upstream.outputs.version }}"
+          timestamp=$(date -u +%Y%m%d-%H%M%S)
+          echo "version_tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "timestamp_tag=build-${timestamp}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
+        if: steps.should_build.outputs.build == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        if: steps.should_build.outputs.build == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
+        if: steps.should_build.outputs.build == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build and push multi-arch image
+        if: steps.should_build.outputs.build == 'true'
         uses: docker/build-push-action@v5
         with:
           context: package
           file: package/Dockerfile
           push: true
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/hytale-server:latest-${{ matrix.suffix }}
-            ghcr.io/${{ github.repository_owner }}/hytale-server:${{ needs.plan.outputs.version_tag }}-${{ matrix.suffix }}
-            ghcr.io/${{ github.repository_owner }}/hytale-server:${{ needs.plan.outputs.timestamp_tag }}-${{ matrix.suffix }}
-
-  publish:
-    runs-on: ubuntu-latest
-    needs: [plan, build-image]
-    if: needs.plan.outputs.build == 'true'
-    permissions:
-      contents: write
-      packages: write
-    steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish multi-arch manifests
-        shell: bash
-        run: |
-          image="ghcr.io/${{ github.repository_owner }}/hytale-server"
-          version_tag="${{ needs.plan.outputs.version_tag }}"
-          timestamp_tag="${{ needs.plan.outputs.timestamp_tag }}"
-
-          docker buildx imagetools create -t "${image}:latest" \
-            "${image}:latest-amd64" \
-            "${image}:latest-arm64"
-
-          docker buildx imagetools create -t "${image}:${version_tag}" \
-            "${image}:${version_tag}-amd64" \
-            "${image}:${version_tag}-arm64"
-
-          docker buildx imagetools create -t "${image}:${timestamp_tag}" \
-            "${image}:${timestamp_tag}-amd64" \
-            "${image}:${timestamp_tag}-arm64"
+            ghcr.io/${{ github.repository_owner }}/hytale-server:latest
+            ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}
+            ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.timestamp_tag }}
 
       - name: Create release
+        if: steps.should_build.outputs.build == 'true'
         shell: bash
         run: |
           notes_file="$(mktemp)"
           printf '%s\n' \
-            "**Version:** ${{ needs.plan.outputs.version }}" \
-            "**Built:** ${{ needs.plan.outputs.timestamp_tag }}" \
+            "**Version:** ${{ steps.upstream.outputs.version }}" \
+            "**Built:** ${{ steps.tags.outputs.timestamp_tag }}" \
             "" \
             "### Docker Image" \
             "```" \
-            "docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ needs.plan.outputs.version_tag }}" \
+            "docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}" \
             "```" \
             "" \
             "### Tags" \
             "- \`latest\`" \
-            "- \`${{ needs.plan.outputs.version_tag }}\`" \
-            "- \`${{ needs.plan.outputs.timestamp_tag }}\`" \
+            "- \`${{ steps.tags.outputs.version_tag }}\`" \
+            "- \`${{ steps.tags.outputs.timestamp_tag }}\`" \
             > "${notes_file}"
 
-          gh release create "${{ needs.plan.outputs.version_tag }}" \
-            --title "Hytale Server ${{ needs.plan.outputs.version }}" \
+          gh release create "${{ steps.tags.outputs.version_tag }}" \
+            --title "Hytale Server ${{ steps.upstream.outputs.version }}" \
             --notes-file "${notes_file}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
