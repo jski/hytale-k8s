@@ -7,7 +7,7 @@ spec:
   selector:
     app: hytale
     role: server
-  type: LoadBalancer
+  type: ClusterIP
   ports:
     - name: hytale-udp
       port: 5520
