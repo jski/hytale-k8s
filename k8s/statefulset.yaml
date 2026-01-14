@@ -37,6 +37,9 @@ spec:
               value: >-
                 -Xms8G
                 -Xmx12G
+                -XX:+UseG1GC
+                -XX:+ParallelRefProcEnabled
+                -XX:MaxGCPauseMillis=200
             - name: AOT_OPTS
               value: >-
                 -XX:AOTCache=/hytale/data/HytaleServer.aot
