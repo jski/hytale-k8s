@@ -16,8 +16,6 @@ spec:
         app: hytale
         role: server
     spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
       terminationGracePeriodSeconds: 120
       volumes:
         - name: machine-id
@@ -32,14 +30,16 @@ spec:
           tty: true
           ports:
             - containerPort: 5520
+              hostPort: 5520
               protocol: UDP
           env:
             - name: JAVA_OPTS
               value: >-
-                -Djava.net.preferIPv4Stack=true
-                -Djava.net.preferIPv4Addresses=true
-                -Xms6G
-                -Xmx6G
+                -Xms8G
+                -Xmx12G
+                -XX:+UseG1GC
+                -XX:+ParallelRefProcEnabled
+                -XX:MaxGCPauseMillis=200
             - name: AOT_OPTS
               value: >-
                 -XX:AOTCache=/hytale/data/HytaleServer.aot
@@ -57,10 +57,10 @@ spec:
           resources:
             requests:
               cpu: "2"
-              memory: "6Gi"
+              memory: "8Gi"
             limits:
               cpu: "4"
-              memory: "8Gi"
+              memory: "16Gi"
   volumeClaimTemplates:
     - metadata:
         name: hytale-data

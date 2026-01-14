@@ -60,6 +60,7 @@ StorageClass note: this StatefulSet uses the cluster default StorageClass. If yo
 Known assumptions:
 
 - Kubernetes nodes are Linux and expose `/etc/machine-id` so auth persistence works.
+- Pods have IPv6 available (dual-stack cluster setup). The server requires IPv6 sockets for QUIC.
 
 Apply the manifests:
 
@@ -99,10 +100,10 @@ Detach without stopping the server:
 CTRL + P, then CTRL + Q
 ```
 
-Find the service address:
+Connect to the server:
 
 ```bash
-kubectl get svc -n hytale
+<node-public-ip>:5520
 ```
 
 ## First-run checklist
@@ -110,8 +111,8 @@ kubectl get svc -n hytale
 - Wait for the pod to be Running: `kubectl get pods -n hytale`
 - Attach and authenticate: `/auth login device`
 - Enable auth persistence (one-time): `/auth persistence Encrypted`
-- Verify the Service is UDP/5520: `kubectl get svc -n hytale`
-- Connect using the Service external IP/port
+- Ensure UDP 5520 is open on the node firewall and your cloud security rules
+- Connect using `<node-public-ip>:5520`
 
 ## Troubleshooting
 
@@ -128,4 +129,32 @@ Apply it:
 
 ```bash
 kubectl apply -f argocd/application.yaml
+```
+
+## Data migration (node to PVC) - if you already have a server running on baremetal that you're moving to k8s
+
+1) Stop the server:
+
+```bash
+kubectl scale statefulset hytale-server -n hytale --replicas=0
+```
+
+2) Create a temporary pod that mounts the PVC:
+
+```bash
+kubectl -n hytale run hytale-data-migrator --rm -it --image=busybox --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"migrator","image":"busybox","command":["sh","-lc","sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"hytale-data-hytale-server-0"}}]}}'
+```
+
+3) Copy your existing world data into the PVC:
+
+```bash
+kubectl -n hytale cp /path/to/world/. hytale-data-migrator:/data/universe/worlds/default/
+```
+
+4) Remove the migrator pod and start the server:
+
+```bash
+kubectl delete pod -n hytale hytale-data-migrator
+kubectl scale statefulset hytale-server -n hytale --replicas=1
 ```
