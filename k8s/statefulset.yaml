@@ -36,7 +36,7 @@ spec:
             - name: JAVA_OPTS
               value: >-
                 -Xms8G
-                -Xmx8G
+                -Xmx12G
             - name: AOT_OPTS
               value: >-
                 -XX:AOTCache=/hytale/data/HytaleServer.aot
@@ -57,7 +57,7 @@ spec:
               memory: "8Gi"
             limits:
               cpu: "4"
-              memory: "8Gi"
+              memory: "16Gi"
   volumeClaimTemplates:
     - metadata:
         name: hytale-data
