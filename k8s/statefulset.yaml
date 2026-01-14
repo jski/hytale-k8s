@@ -30,6 +30,7 @@ spec:
           tty: true
           ports:
             - containerPort: 5520
+              hostPort: 5520
               protocol: UDP
           env:
             - name: JAVA_OPTS
