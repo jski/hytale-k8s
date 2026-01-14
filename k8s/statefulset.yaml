@@ -36,8 +36,6 @@ spec:
           env:
             - name: JAVA_OPTS
               value: >-
-                -Djava.net.preferIPv4Stack=true
-                -Djava.net.preferIPv4Addresses=true
                 -Xms6G
                 -Xmx6G
             - name: AOT_OPTS

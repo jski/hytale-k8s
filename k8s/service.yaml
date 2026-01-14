@@ -7,7 +7,7 @@ spec:
   selector:
     app: hytale
     role: server
-  type: ClusterIP
+  type: NodePort
   ports:
     - name: hytale-udp
       port: 5520
