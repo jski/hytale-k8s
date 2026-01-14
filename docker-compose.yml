@@ -1,0 +1,9 @@
+# Runs the amd64-only tool in a container and writes outputs to ./artifacts
+
+services:
+  hytale-downloader:
+    build: .
+    platform: linux/amd64
+    volumes:
+      - ./artifacts:/output
+    restart: "no"

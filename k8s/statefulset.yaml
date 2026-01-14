@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hytale-server
+  namespace: hytale
+spec:
+  serviceName: hytale-server
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hytale
+      role: server
+  template:
+    metadata:
+      labels:
+        app: hytale
+        role: server
+    spec:
+      terminationGracePeriodSeconds: 120
+      volumes:
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+      containers:
+        - name: hytale
+          image: ghcr.io/jski/hytale-server:latest
+          imagePullPolicy: IfNotPresent
+          stdin: true
+          tty: true
+          ports:
+            - containerPort: 5520
+              protocol: UDP
+          env:
+            - name: JAVA_OPTS
+              value: >-
+                -Djava.net.preferIPv4Stack=true
+                -Djava.net.preferIPv4Addresses=true
+                -Xms6G
+                -Xmx6G
+            - name: AOT_OPTS
+              value: >-
+                -XX:AOTCache=/hytale/data/HytaleServer.aot
+          workingDir: /hytale/data
+          command:
+            - sh
+            - -lc
+            - exec java $JAVA_OPTS $AOT_OPTS -jar /hytale/HytaleServer.jar --assets /hytale/Assets.zip
+          volumeMounts:
+            - name: hytale-data
+              mountPath: /hytale/data
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+          resources:
+            requests:
+              cpu: "2"
+              memory: "6Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+  volumeClaimTemplates:
+    - metadata:
+        name: hytale-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
