@@ -35,8 +35,8 @@ spec:
           env:
             - name: JAVA_OPTS
               value: >-
-                -Xms6G
-                -Xmx6G
+                -Xms8G
+                -Xmx8G
             - name: AOT_OPTS
               value: >-
                 -XX:AOTCache=/hytale/data/HytaleServer.aot
@@ -54,7 +54,7 @@ spec:
           resources:
             requests:
               cpu: "2"
-              memory: "6Gi"
+              memory: "8Gi"
             limits:
               cpu: "4"
               memory: "8Gi"
@@ -65,4 +65,4 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 10Gi
+            storage: 20Gi
