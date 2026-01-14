@@ -16,6 +16,8 @@ spec:
         app: hytale
         role: server
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       terminationGracePeriodSeconds: 120
       volumes:
         - name: machine-id
