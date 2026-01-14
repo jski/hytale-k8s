@@ -142,14 +142,13 @@ kubectl scale statefulset hytale-server -n hytale --replicas=0
 2) Create a temporary pod that mounts the PVC:
 
 ```bash
-kubectl -n hytale run hytale-data-migrator --rm -it --image=busybox --restart=Never \
-  --overrides='{"spec":{"containers":[{"name":"migrator","image":"busybox","command":["sh","-lc","sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"hytale-data-hytale-server-0"}}]}}'
+kubectl -n hytale run hytale-data-migrator --rm -it --image=busybox --restart=Never --overrides='{"spec":{"containers":[{"name":"migrator","image":"busybox","command":["sh","-lc","sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"hytale-data-hytale-server-0"}}]}}'
 ```
 
 3) Copy your existing world data into the PVC:
 
 ```bash
-kubectl -n hytale cp /path/to/world/. hytale-data-migrator:/data/universe/worlds/default/
+kubectl -n hytale cp /path/to/universe/. hytale-data-migrator:/data/universe/
 ```
 
 4) Remove the migrator pod and start the server:
