@@ -76,6 +76,9 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
 
+          # Save return code for later steps
+          echo "${rc}" > /tmp/downloader_rc
+
           if [[ $rc -eq 124 ]]; then
             echo "::error::Downloader timed out (would indicate device auth fallback)"
             exit 124
@@ -96,7 +99,9 @@ jobs:
           echo "Captured version: ${version}"
 
       - name: Persist rotated refresh token
-        if: success()
+        # CRITICAL: Run this even if previous step failed, as long as credentials file exists
+        # The token may have already been rotated even if the downloader failed
+        if: always()
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
@@ -110,15 +115,26 @@ jobs:
           fi
 
           new_rt="$(jq -r '.refresh_token // ""' "$cred")"
+          if [[ -z "$new_rt" ]]; then
+            echo "::warning::Empty refresh token in credentials file"
+            exit 0
+          fi
+          
           if [[ "$new_rt" != ory_rt_* ]]; then
-            echo "::warning::No rotated refresh token found"
+            echo "::warning::Refresh token does not match expected format (ory_rt_*)"
+            exit 0
+          fi
+
+          old_rt="${{ secrets.HYTALE_REFRESH_TOKEN }}"
+          if [[ "$new_rt" == "$old_rt" ]]; then
+            echo "Refresh token unchanged, no update needed"
             exit 0
           fi
 
           # IMPORTANT: gh reads from stdin if --body is omitted
           printf '%s' "$new_rt" | gh secret set HYTALE_REFRESH_TOKEN -r "$GITHUB_REPOSITORY"
 
-          echo "Updated HYTALE_REFRESH_TOKEN (not displayed)"
+          echo "✓ Updated HYTALE_REFRESH_TOKEN (token rotated by downloader)"
 
       - name: Get current release version
         id: current
@@ -158,6 +174,41 @@ jobs:
 
           cd ..
 
+      # Add another token persistence step after download in case it rotated again
+      - name: Persist rotated refresh token (after download)
+        if: always() && steps.should_build.outputs.build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cred="${HOME}/.hytale-downloader-credentials.json"
+          if [[ ! -f "$cred" ]]; then
+            echo "::warning::No credentials file to persist"
+            exit 0
+          fi
+
+          new_rt="$(jq -r '.refresh_token // ""' "$cred")"
+          if [[ -z "$new_rt" ]]; then
+            echo "::warning::Empty refresh token in credentials file"
+            exit 0
+          fi
+          
+          if [[ "$new_rt" != ory_rt_* ]]; then
+            echo "::warning::Refresh token does not match expected format (ory_rt_*)"
+            exit 0
+          fi
+
+          old_rt="${{ secrets.HYTALE_REFRESH_TOKEN }}"
+          if [[ "$new_rt" == "$old_rt" ]]; then
+            echo "Refresh token unchanged, no update needed"
+            exit 0
+          fi
+
+          printf '%s' "$new_rt" | gh secret set HYTALE_REFRESH_TOKEN -r "$GITHUB_REPOSITORY"
+
+          echo "✓ Updated HYTALE_REFRESH_TOKEN after download (token rotated)"
 
       - name: Extract and prepare server files
         if: steps.should_build.outputs.build == 'true'
