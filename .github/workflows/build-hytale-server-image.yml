@@ -2,14 +2,13 @@ name: Build Hytale Server Image
 
 on:
   push:
-    branches:
-      - master
+    branches: [master]
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       force_build:
-        description: "Force a rebuild even if upstream version is unchanged"
+        description: Force a rebuild even if upstream version is unchanged
         type: boolean
         default: false
 
@@ -21,10 +20,6 @@ jobs:
       contents: write
       packages: write
 
-    env:
-      HOME: /home/runner
-      XDG_CONFIG_HOME: /home/runner/.config
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,11 +28,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL "https://downloader.hytale.com/hytale-downloader.zip" -o hytale-downloader.zip
+          curl -fsSL https://downloader.hytale.com/hytale-downloader.zip -o hytale-downloader.zip
           unzip -q hytale-downloader.zip
           chmod +x hytale-downloader-linux-amd64
 
-      - name: Setup OAuth credentials (refresh token)
+      - name: Write downloader credentials (current directory)
         shell: bash
         env:
           HYTALE_REFRESH_TOKEN: ${{ secrets.HYTALE_REFRESH_TOKEN }}
@@ -45,74 +40,143 @@ jobs:
           set -euo pipefail
 
           if [[ -z "${HYTALE_REFRESH_TOKEN:-}" ]]; then
-            echo "::error::Missing required secret HYTALE_REFRESH_TOKEN"
+            echo "::error::Missing HYTALE_REFRESH_TOKEN"
             exit 1
           fi
 
-          cred_json="$(mktemp)"
-          cat > "${cred_json}" <<EOF
-          {"refresh_token":"${HYTALE_REFRESH_TOKEN}"}
-          EOF
-          chmod 600 "${cred_json}"
+          if [[ "${HYTALE_REFRESH_TOKEN}" != ory_rt_* ]]; then
+            echo "::error::HYTALE_REFRESH_TOKEN does not look like a refresh token"
+            exit 1
+          fi
 
-          echo "Using HOME=${HOME}"
-          echo "Using XDG_CONFIG_HOME=${XDG_CONFIG_HOME}"
+          # Write to CURRENT DIRECTORY, not HOME
+          # This is where the downloader actually looks for credentials
+          printf '%s\n' \
+            "{\"access_token\":\"\",\"refresh_token\":\"${HYTALE_REFRESH_TOKEN}\",\"expires_at\":0,\"branch\":\"release\"}" \
+            > .hytale-downloader-credentials.json
 
-          cp "${cred_json}" "${HOME}/.hytale-downloader-credentials.json"
-          chmod 600 "${HOME}/.hytale-downloader-credentials.json"
+          chmod 600 .hytale-downloader-credentials.json
 
-          mkdir -p "${XDG_CONFIG_HOME}/hytale-downloader"
-          cp "${cred_json}" "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
-          chmod 600 "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
+          echo "Credentials written to $(pwd)/.hytale-downloader-credentials.json"
+          echo "Working directory: $(pwd)"
 
-          cp "${cred_json}" "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json"
-          mkdir -p "${GITHUB_WORKSPACE}/.config/hytale-downloader"
-          cp "${cred_json}" "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json"
-
-          # Minimal sanity output (no secrets)
-          python3 - <<'PY'
-          import json, os
-          paths = [
-              os.path.expanduser("~/.hytale-downloader-credentials.json"),
-              os.path.expanduser("~/.config/hytale-downloader/credentials.json"),
-          ]
-          for p in paths:
-              try:
-                  d = json.load(open(p))
-                  rt = d.get("refresh_token","")
-                  print(f"Credentials OK at {p} (refresh_token length={len(rt)})")
-              except Exception as e:
-                  print(f"Credentials NOT readable at {p}: {e}")
-          PY
+      - name: Debug - Check credentials before downloader
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== DEBUG: Credentials file check BEFORE downloader ==="
+          echo "PWD=${PWD}"
+          
+          cred=".hytale-downloader-credentials.json"
+          if [[ -f "$cred" ]]; then
+            echo "✓ Credentials file exists at: $(pwd)/$cred"
+            echo "File size: $(stat -c%s "$cred" 2>/dev/null || stat -f%z "$cred" 2>/dev/null || echo 'unknown') bytes"
+            echo "Refresh token starts with: $(jq -r '.refresh_token // ""' "$cred" | cut -c1-20)..."
+          else
+            echo "✗ Credentials file NOT found at: $(pwd)/$cred"
+          fi
 
       - name: Get upstream version
         id: upstream
         shell: bash
         run: |
           set -euo pipefail
-          echo "Running downloader to get version..."
 
-          # Capture full output so failures are visible even with `set -e`.
+          echo "Running downloader to get version..."
+          echo "Working directory: $(pwd)"
+          
+          # Downloader looks in current directory, not HOME
           set +e
-          ./hytale-downloader-linux-amd64 -print-version > downloader-version.log 2>&1
-          rc=$?
+          timeout 90s stdbuf -oL -eL \
+            ./hytale-downloader-linux-amd64 -print-version \
+            2>&1 | tee downloader-version.log
+          rc=${PIPESTATUS[0]}
           set -e
 
+          # Save return code for later steps
+          echo "${rc}" > /tmp/downloader_rc
+
+          echo "=== DEBUG: Full downloader output ==="
+          cat downloader-version.log
+          echo "=== END downloader output ==="
+
+          if [[ $rc -eq 124 ]]; then
+            echo "::error::Downloader timed out (would indicate device auth fallback)"
+            exit 124
+          fi
           if [[ $rc -ne 0 ]]; then
-            echo "::error::Downloader failed (exit code $rc). Full output below:"
-            sed -e 's/\r$//' downloader-version.log
+            echo "::error::Downloader failed with exit code: $rc"
             exit $rc
           fi
 
           version="$(tail -n 1 downloader-version.log | tr -d '\r\n ')"
           if [[ -z "$version" ]]; then
-            echo "::error::Downloader succeeded but version was empty. Output:"
-            sed -e 's/\r$//' downloader-version.log
+            echo "::error::Version empty"
+            cat downloader-version.log
             exit 1
           fi
 
-          echo "Captured version: ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Captured version: ${version}"
+          echo "::notice::Upstream version available in downloader: ${version}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            echo "Upstream version: ${version}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Debug - Check credentials after downloader
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== DEBUG: Credentials file check AFTER downloader ==="
+          
+          cred=".hytale-downloader-credentials.json"
+          if [[ -f "$cred" ]]; then
+            echo "✓ Credentials file exists at: $(pwd)/$cred"
+            echo "File size: $(stat -c%s "$cred" 2>/dev/null || stat -f%z "$cred" 2>/dev/null || echo 'unknown') bytes"
+            echo "File contents (redacted):"
+            jq '{access_token: (.access_token | if . == "" then "EMPTY" else "SET" end), refresh_token: (.refresh_token | if . == "" then "EMPTY" elif . then (.[:20] + "...") else "NULL" end), expires_at, branch}' "$cred" || cat "$cred"
+          else
+            echo "✗ Credentials file NOT found at: $(pwd)/$cred"
+          fi
+
+      - name: Persist rotated refresh token
+        # CRITICAL: Run this even if previous step failed, as long as credentials file exists
+        # The token may have already been rotated even if the downloader failed
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cred=".hytale-downloader-credentials.json"
+          if [[ ! -f "$cred" ]]; then
+            echo "::warning::No credentials file to persist"
+            exit 0
+          fi
+
+          new_rt="$(jq -r '.refresh_token // ""' "$cred")"
+          if [[ -z "$new_rt" ]]; then
+            echo "::warning::Empty refresh token in credentials file"
+            exit 0
+          fi
+          
+          if [[ "$new_rt" != ory_rt_* ]]; then
+            echo "::warning::Refresh token does not match expected format (ory_rt_*)"
+            exit 0
+          fi
+
+          old_rt="${{ secrets.HYTALE_REFRESH_TOKEN }}"
+          if [[ "$new_rt" == "$old_rt" ]]; then
+            echo "Refresh token unchanged, no update needed"
+            exit 0
+          fi
+
+          # IMPORTANT: gh reads from stdin if --body is omitted
+          printf '%s' "$new_rt" | gh secret set HYTALE_REFRESH_TOKEN -r "$GITHUB_REPOSITORY"
+
+          echo "✓ Updated HYTALE_REFRESH_TOKEN (token rotated by downloader)"
 
       - name: Get current release version
         id: current
@@ -121,39 +185,40 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-
-          # gh will exit non-zero if there are no releases in some configs; handle cleanly.
-          set +e
-          version_json="$(gh release list --limit 1 --json tagName 2>&1)"
-          rc=$?
-          set -e
-
-          if [[ $rc -ne 0 ]]; then
-            echo "::warning::Failed to fetch releases (maybe none exist yet). gh output:"
-            echo "$version_json"
-            version=""
-          else
-            version="$(echo "$version_json" | jq -r '.[0].tagName // ""' | sed 's/^v//')"
-          fi
-
+          version="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Current version: ${version:-none}"
+          if [[ -z "${version}" ]]; then
+            echo "::notice::Current release version not found"
+          else
+            echo "::notice::Current release version: ${version}"
+          fi
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            echo "Current release version: ${version}" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Determine if build is needed
         id: should_build
         shell: bash
         run: |
           set -euo pipefail
-
           if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
+            echo "::notice::Decision: build=true (forced via workflow input)"
             echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "Build forced via workflow_dispatch"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              printf '%s\n' "Decision: build=true (forced via workflow input)" >> "$GITHUB_STEP_SUMMARY"
+            fi
           elif [[ "${{ steps.current.outputs.version }}" == "${{ steps.upstream.outputs.version }}" ]]; then
+            echo "::notice::Decision: build=false (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})"
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Version unchanged (${{ steps.upstream.outputs.version }}), skipping build"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              printf '%s\n' "Decision: build=false (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})" >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
+            echo "::notice::Decision: build=true (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})"
             echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "Version changed: ${{ steps.current.outputs.version || 'none' }} -> ${{ steps.upstream.outputs.version }}"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              printf '%s\n' "Decision: build=true (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
       - name: Download server files
@@ -161,31 +226,56 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Using HOME=${HOME}"
-          export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
-
           mkdir -p output
           cd output
+          
+          # Copy credentials to output directory since we're changing directories
+          cp ../.hytale-downloader-credentials.json .hytale-downloader-credentials.json
 
-          # Ensure creds are present in this working directory too (some tools look relative).
-          cp "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json" ./ || true
-          mkdir -p .config/hytale-downloader
-          cp "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json" .config/hytale-downloader/credentials.json || true
+          timeout 15m stdbuf -oL -eL \
+            ../hytale-downloader-linux-amd64 \
+            2>&1 | tee downloader-run.log
 
-          # Run downloader and capture full output for debugging.
-          set +e
-          ../hytale-downloader-linux-amd64 > downloader-run.log 2>&1
-          rc=$?
-          set -e
-
-          if [[ $rc -ne 0 ]]; then
-            echo "::error::Downloader failed (exit code $rc). Full output below:"
-            sed -e 's/\r$//' downloader-run.log
-            exit $rc
-          fi
+          # Copy updated credentials back to parent directory for persistence step
+          cp .hytale-downloader-credentials.json ../.hytale-downloader-credentials.json
 
           cd ..
+
+      # Add another token persistence step after download in case it rotated again
+      - name: Persist rotated refresh token (after download)
+        if: always() && steps.should_build.outputs.build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          cred=".hytale-downloader-credentials.json"
+          if [[ ! -f "$cred" ]]; then
+            echo "::warning::No credentials file to persist"
+            exit 0
+          fi
+
+          new_rt="$(jq -r '.refresh_token // ""' "$cred")"
+          if [[ -z "$new_rt" ]]; then
+            echo "::warning::Empty refresh token in credentials file"
+            exit 0
+          fi
+          
+          if [[ "$new_rt" != ory_rt_* ]]; then
+            echo "::warning::Refresh token does not match expected format (ory_rt_*)"
+            exit 0
+          fi
+
+          old_rt="${{ secrets.HYTALE_REFRESH_TOKEN }}"
+          if [[ "$new_rt" == "$old_rt" ]]; then
+            echo "Refresh token unchanged, no update needed"
+            exit 0
+          fi
+
+          printf '%s' "$new_rt" | gh secret set HYTALE_REFRESH_TOKEN -r "$GITHUB_REPOSITORY"
+
+          echo "✓ Updated HYTALE_REFRESH_TOKEN after download (token rotated)"
 
       - name: Extract and prepare server files
         if: steps.should_build.outputs.build == 'true'
@@ -195,7 +285,6 @@ jobs:
 
           mkdir -p stage package
 
-          # Find latest zip; if missing, print diagnostics.
           latest_zip="$(ls -t output/*.zip 2>/dev/null | head -n 1 || true)"
           if [[ -z "$latest_zip" ]]; then
             echo "::error::No ZIP found in output/. Listing output directory:"
@@ -206,7 +295,6 @@ jobs:
 
           unzip -q "$latest_zip" -d stage
 
-          # Helper to fail with clear message if file is missing
           require_one() {
             local pattern="$1"
             local desc="$2"
@@ -302,7 +390,6 @@ jobs:
               "- \`${{ steps.tags.outputs.timestamp_tag }}\`"
           } > "${notes_file}"
 
-          # If the release/tag already exists, gh will fail; surface a clear error.
           set +e
           gh release create "${{ steps.tags.outputs.version_tag }}" \
             --title "Hytale Server ${{ steps.upstream.outputs.version }}" \
