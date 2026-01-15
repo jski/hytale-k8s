@@ -29,15 +29,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Free disk space
-        shell: bash
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
-          df -h
-
       - name: Download Hytale downloader tool
         shell: bash
         run: |
+          set -euo pipefail
           curl -fsSL "https://downloader.hytale.com/hytale-downloader.zip" -o hytale-downloader.zip
           unzip -q hytale-downloader.zip
           chmod +x hytale-downloader-linux-amd64
@@ -54,8 +49,6 @@ jobs:
             exit 1
           fi
 
-          # Create a minimal credentials file using ONLY the refresh token.
-          # (Access tokens are short-lived and should not be stored in GitHub Secrets.)
           cred_json="$(mktemp)"
           cat > "${cred_json}" <<EOF
           {"refresh_token":"${HYTALE_REFRESH_TOKEN}"}
@@ -65,17 +58,13 @@ jobs:
           echo "Using HOME=${HOME}"
           echo "Using XDG_CONFIG_HOME=${XDG_CONFIG_HOME}"
 
-          # Place the credentials in the most likely locations the downloader will check.
-          # 1) Home-based file
           cp "${cred_json}" "${HOME}/.hytale-downloader-credentials.json"
           chmod 600 "${HOME}/.hytale-downloader-credentials.json"
 
-          # 2) XDG config path
           mkdir -p "${XDG_CONFIG_HOME}/hytale-downloader"
           cp "${cred_json}" "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
           chmod 600 "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
 
-          # Also keep a copy in workspace so later steps that cd can reuse it.
           cp "${cred_json}" "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json"
           mkdir -p "${GITHUB_WORKSPACE}/.config/hytale-downloader"
           cp "${cred_json}" "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json"
@@ -102,8 +91,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "Running downloader to get version..."
-          # This call requires auth because it fetches the manifest.
-          version="$(./hytale-downloader-linux-amd64 -print-version 2>&1 | tail -n 1 | tr -d '\r\n ')"
+
+          # Capture full output so failures are visible even with `set -e`.
+          set +e
+          ./hytale-downloader-linux-amd64 -print-version > downloader-version.log 2>&1
+          rc=$?
+          set -e
+
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::Downloader failed (exit code $rc). Full output below:"
+            sed -e 's/\r$//' downloader-version.log
+            exit $rc
+          fi
+
+          version="$(tail -n 1 downloader-version.log | tr -d '\r\n ')"
+          if [[ -z "$version" ]]; then
+            echo "::error::Downloader succeeded but version was empty. Output:"
+            sed -e 's/\r$//' downloader-version.log
+            exit 1
+          fi
+
           echo "Captured version: ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
@@ -114,7 +121,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          version="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')"
+
+          # gh will exit non-zero if there are no releases in some configs; handle cleanly.
+          set +e
+          version_json="$(gh release list --limit 1 --json tagName 2>&1)"
+          rc=$?
+          set -e
+
+          if [[ $rc -ne 0 ]]; then
+            echo "::warning::Failed to fetch releases (maybe none exist yet). gh output:"
+            echo "$version_json"
+            version=""
+          else
+            version="$(echo "$version_json" | jq -r '.[0].tagName // ""' | sed 's/^v//')"
+          fi
+
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Current version: ${version:-none}"
 
@@ -147,13 +168,22 @@ jobs:
           mkdir -p output
           cd output
 
-          # Ensure creds are present in *this* working directory too (some tools look relative).
+          # Ensure creds are present in this working directory too (some tools look relative).
           cp "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json" ./ || true
           mkdir -p .config/hytale-downloader
           cp "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json" .config/hytale-downloader/credentials.json || true
 
-          # Run downloader (downloads server ZIP into ./output)
-          ../hytale-downloader-linux-amd64
+          # Run downloader and capture full output for debugging.
+          set +e
+          ../hytale-downloader-linux-amd64 > downloader-run.log 2>&1
+          rc=$?
+          set -e
+
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::Downloader failed (exit code $rc). Full output below:"
+            sed -e 's/\r$//' downloader-run.log
+            exit $rc
+          fi
 
           cd ..
 
@@ -164,12 +194,45 @@ jobs:
           set -euo pipefail
 
           mkdir -p stage package
-          latest_zip="$(ls -t output/*.zip | head -n 1)"
+
+          # Find latest zip; if missing, print diagnostics.
+          latest_zip="$(ls -t output/*.zip 2>/dev/null | head -n 1 || true)"
+          if [[ -z "$latest_zip" ]]; then
+            echo "::error::No ZIP found in output/. Listing output directory:"
+            ls -la output || true
+            echo "::error::Downloader may have succeeded but did not produce a ZIP. See output/downloader-run.log"
+            exit 1
+          fi
+
           unzip -q "$latest_zip" -d stage
 
-          cp "$(find stage -name 'Assets.zip' -type f)" package/Assets.zip
-          cp "$(find stage -name 'HytaleServer.jar' -type f)" package/HytaleServer.jar
-          cp "$(find stage -name 'HytaleServer.aot' -type f)" package/HytaleServer.aot
+          # Helper to fail with clear message if file is missing
+          require_one() {
+            local pattern="$1"
+            local desc="$2"
+            local found
+            found="$(find stage -name "$pattern" -type f | head -n 1 || true)"
+            if [[ -z "$found" ]]; then
+              echo "::error::Missing required artifact: ${desc} (pattern: ${pattern})"
+              echo "Stage contents:"
+              find stage -maxdepth 4 -type f | sed -e 's/^/  /' | head -n 200
+              exit 1
+            fi
+            echo "$found"
+          }
+
+          assets_zip="$(require_one 'Assets.zip' 'Assets.zip')"
+          server_jar="$(require_one 'HytaleServer.jar' 'HytaleServer.jar')"
+          server_aot="$(require_one 'HytaleServer.aot' 'HytaleServer.aot')"
+
+          cp "$assets_zip" package/Assets.zip
+          cp "$server_jar" package/HytaleServer.jar
+          cp "$server_aot" package/HytaleServer.aot
+
+          if [[ ! -f server/Dockerfile ]]; then
+            echo "::error::Missing server/Dockerfile in repo"
+            exit 1
+          fi
           cp server/Dockerfile package/Dockerfile
 
           rm -rf stage output
@@ -239,6 +302,16 @@ jobs:
               "- \`${{ steps.tags.outputs.timestamp_tag }}\`"
           } > "${notes_file}"
 
+          # If the release/tag already exists, gh will fail; surface a clear error.
+          set +e
           gh release create "${{ steps.tags.outputs.version_tag }}" \
             --title "Hytale Server ${{ steps.upstream.outputs.version }}" \
-            --notes-file "${notes_file}"
+            --notes-file "${notes_file}" 2> gh-release.err
+          rc=$?
+          set -e
+
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::Failed to create release (exit code $rc). gh output:"
+            cat gh-release.err
+            exit $rc
+          fi
