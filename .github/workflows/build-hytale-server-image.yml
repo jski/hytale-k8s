@@ -32,7 +32,7 @@ jobs:
           unzip -q hytale-downloader.zip
           chmod +x hytale-downloader-linux-amd64
 
-      - name: Setup OAuth credentials (try common locations/formats)
+      - name: Setup OAuth credentials (match downloader JSON shape)
         shell: bash
         env:
           HYTALE_REFRESH_TOKEN: ${{ secrets.HYTALE_REFRESH_TOKEN }}
@@ -53,20 +53,23 @@ jobs:
             exit 1
           fi
 
-          # Write JSON payload(s)
-          json_payload="$(printf '{"refresh_token":"%s"}\n' "${HYTALE_REFRESH_TOKEN}")"
+          # IMPORTANT: match the exact structure the downloader writes locally:
+          # {"access_token":"...","refresh_token":"...","expires_at":...,"branch":"release"}
+          # We only store refresh_token in secrets; access_token/expires_at will be re-minted.
+          cred_json="$(printf '{"access_token":"","refresh_token":"%s","expires_at":0,"branch":"release"}\n' "${HYTALE_REFRESH_TOKEN}")"
 
-          printf "%s" "${json_payload}" > "${HOME}/.hytale-downloader-credentials.json"
+          # Write to likely locations
+          printf "%s" "${cred_json}" > "${HOME}/.hytale-downloader-credentials.json"
           chmod 600 "${HOME}/.hytale-downloader-credentials.json"
 
-          printf "%s" "${json_payload}" > "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
+          printf "%s" "${cred_json}" > "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
           chmod 600 "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
 
-          # Some tools use a plain-text credentials file
-          printf "%s" "${HYTALE_REFRESH_TOKEN}" > "${XDG_CONFIG_HOME}/hytale-downloader/credentials"
+          # Some tools also look for a non-.json filename; keep it identical JSON content
+          printf "%s" "${cred_json}" > "${XDG_CONFIG_HOME}/hytale-downloader/credentials"
           chmod 600 "${XDG_CONFIG_HOME}/hytale-downloader/credentials"
 
-          echo "Wrote credentials to:"
+          echo "Wrote credentials (token not displayed) to:"
           echo " - ${HOME}/.hytale-downloader-credentials.json"
           echo " - ${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
           echo " - ${XDG_CONFIG_HOME}/hytale-downloader/credentials"
@@ -80,7 +83,7 @@ jobs:
 
           echo "Running downloader to get version..."
 
-          # Fail fast if it hangs (likely waiting for interactive auth).
+          # Show output live so we can see if it ever tries to device-auth again
           set +e
           timeout 90s stdbuf -oL -eL env HOME="${HOME}" XDG_CONFIG_HOME="${XDG_CONFIG_HOME}" ./hytale-downloader-linux-amd64 -print-version 2>&1 | tee downloader-version.log
           rc=${PIPESTATUS[0]}
@@ -90,15 +93,14 @@ jobs:
             echo "::error::Downloader timed out (likely waiting for interactive auth)."
             exit 124
           fi
-
           if [[ $rc -ne 0 ]]; then
-            echo "::error::Downloader failed (exit code $rc). Full output above."
+            echo "::error::Downloader failed (exit code $rc). Output above."
             exit $rc
           fi
 
           version="$(tail -n 1 downloader-version.log | tr -d '\r\n ')"
           if [[ -z "$version" ]]; then
-            echo "::error::Downloader succeeded but version was empty. Output:"
+            echo "::error::Downloader succeeded but version was empty. Full output:"
             cat downloader-version.log
             exit 1
           fi
@@ -115,6 +117,7 @@ jobs:
           set -euo pipefail
           export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 
+          # The downloader may update ONE of these files; pick the first with a valid-looking refresh token.
           candidates=(
             "${HOME}/.hytale-downloader-credentials.json"
             "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
@@ -135,12 +138,11 @@ jobs:
           done
 
           if [[ -z "${found}" || -z "${new_rt}" ]]; then
-            echo "::warning::No usable refresh token found in any credentials file; skipping secret update."
+            echo "::warning::No usable refresh token found in credentials files; skipping secret update."
             exit 0
           fi
 
-          # IMPORTANT: do NOT pass --body - (that sets the secret literally to "-").
-          # gh reads secret value from stdin if --body isn't specified.
+          # IMPORTANT: on this gh version, omit --body entirely so it reads from stdin
           printf '%s' "${new_rt}" | gh secret set HYTALE_REFRESH_TOKEN -r "${GITHUB_REPOSITORY}"
 
           echo "Updated HYTALE_REFRESH_TOKEN from ${found} (token not displayed)."
@@ -205,7 +207,6 @@ jobs:
             echo "::error::Downloader timed out. Output above and in output/downloader-run.log"
             exit 124
           fi
-
           if [[ $rc -ne 0 ]]; then
             echo "::error::Downloader failed (exit code $rc). Output above and in output/downloader-run.log"
             exit $rc
