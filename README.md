@@ -1,5 +1,8 @@
 # hytale-k8s
 
+[![Build Hytale Server Image](https://github.com/jski/hytale-k8s/actions/workflows/build-hytale-server-image.yml/badge.svg)](https://github.com/jski/hytale-k8s/actions/workflows/build-hytale-server-image.yml)
+[![Latest Release](https://img.shields.io/github/v/release/jski/hytale-k8s)](https://github.com/jski/hytale-k8s/releases)
+
 Build and run a Hytale server image with a minimal Kubernetes setup.
 
 ## Build server artifacts (optional)
