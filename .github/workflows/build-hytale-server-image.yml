@@ -41,9 +41,12 @@ jobs:
 
           # Ensure HOME exists (needed for act; harmless on GitHub runners)
           : "${HOME:?HOME not set}"
-          mkdir -p "${HOME}"
+          mkdir -p "${HOME}" "${HOME}/.config" "${XDG_CONFIG_HOME:-${HOME}/.config}/hytale-downloader"
           export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
-          mkdir -p "${XDG_CONFIG_HOME}"
+
+          printf '{"refresh_token":"%s"}\n' "${HYTALE_REFRESH_TOKEN}" > "${HOME}/.hytale-downloader-credentials.json"
+          printf '{"refresh_token":"%s"}\n' "${HYTALE_REFRESH_TOKEN}" > "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
+          chmod 600 "${HOME}/.hytale-downloader-credentials.json" "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
 
           if [[ -z "${HYTALE_REFRESH_TOKEN:-}" ]]; then
             echo "::error::Missing required secret HYTALE_REFRESH_TOKEN"
@@ -69,33 +72,24 @@ jobs:
           set -euo pipefail
           echo "Running downloader to get version..."
 
-          # Fail fast if it hangs (likely waiting for interactive device auth).
-          # `stdbuf` makes output line-buffered so you can see progress in CI logs.
           set +e
           timeout 90s stdbuf -oL -eL ./hytale-downloader-linux-amd64 -print-version 2>&1 | tee downloader-version.log
           rc=${PIPESTATUS[0]}
-          # timeout returns 124 when it kills the process
-          if [[ $rc -eq 124 ]]; then
-            echo "::error::Downloader timed out (likely waiting for interactive auth)."
-            echo "::error::Your refresh token may be invalid/rotated; re-auth and update HYTALE_REFRESH_TOKEN (or ensure rotation persistence step is working)."
-            exit 124
-          fi
           set -e
 
+          if [[ $rc -eq 124 ]]; then
+            echo "::error::Downloader timed out (likely waiting for interactive auth)."
+            exit 124
+          fi
           if [[ $rc -ne 0 ]]; then
-            echo "::error::Downloader failed (exit code $rc). Output above and also in downloader-version.log"
+            echo "::error::Downloader failed (exit code $rc). Output above."
             exit $rc
           fi
 
           version="$(tail -n 1 downloader-version.log | tr -d '\r\n ')"
-          if [[ -z "$version" ]]; then
-            echo "::error::Downloader succeeded but version was empty. Full output:"
-            cat downloader-version.log
-            exit 1
-          fi
-
           echo "Captured version: ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+
 
 
       - name: Persist rotated refresh token back to repo secret
@@ -105,31 +99,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
         run: |
           set -euo pipefail
+          export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 
-          cred_path="${HOME}/.hytale-downloader-credentials.json"
-          if [[ ! -f "${cred_path}" ]]; then
-            echo "::warning::No credentials file found at ${cred_path}; skipping secret update."
+          candidates=(
+            "${HOME}/.hytale-downloader-credentials.json"
+            "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
+          )
+
+          found=""
+          for p in "${candidates[@]}"; do
+            if [[ -f "$p" ]]; then
+              rt="$(jq -r '.refresh_token // ""' "$p" || true)"
+              if [[ "$rt" == ory_rt_* ]]; then
+                found="$p"
+                new_rt="$rt"
+                break
+              fi
+            fi
+          done
+
+          if [[ -z "${found}" ]]; then
+            echo "::warning::No usable refresh token found in any credentials file; skipping secret update."
             exit 0
           fi
 
-          new_rt="$(jq -r '.refresh_token // ""' "${cred_path}")"
-
-          if [[ -z "${new_rt}" ]]; then
-            echo "::warning::No refresh_token found in ${cred_path}; skipping secret update."
-            exit 0
-          fi
-
-          if [[ "${new_rt}" != ory_rt_* ]]; then
-            echo "::warning::refresh_token did not look like expected value; skipping update."
-            exit 0
-          fi
-
-          # IMPORTANT:
-          # - Don't pass --body - (that sets the secret literally to "-")
-          # - Let gh read from stdin by omitting --body entirely
           printf '%s' "${new_rt}" | gh secret set HYTALE_REFRESH_TOKEN -r "${GITHUB_REPOSITORY}"
 
-          echo "Updated HYTALE_REFRESH_TOKEN (token not displayed)."
+          echo "Updated HYTALE_REFRESH_TOKEN from ${found} (token not displayed)."
+
 
 
       - name: Get current release version
