@@ -124,10 +124,10 @@ jobs:
             exit 0
           fi
 
-          # IMPORTANT: use stdin, not --body-file
-          echo "${new_rt}" | gh secret set HYTALE_REFRESH_TOKEN \
-            --repo "${GITHUB_REPOSITORY}" \
-            --body -
+          # IMPORTANT:
+          # - Don't pass --body - (that sets the secret literally to "-")
+          # - Let gh read from stdin by omitting --body entirely
+          printf '%s' "${new_rt}" | gh secret set HYTALE_REFRESH_TOKEN -r "${GITHUB_REPOSITORY}"
 
           echo "Updated HYTALE_REFRESH_TOKEN (token not displayed)."
 
@@ -177,6 +177,10 @@ jobs:
         if: steps.should_build.outputs.build == 'true'
         shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p output
+          cd output
+
           set +e
           timeout 15m stdbuf -oL -eL ../hytale-downloader-linux-amd64 2>&1 | tee downloader-run.log
           rc=${PIPESTATUS[0]}
@@ -190,6 +194,9 @@ jobs:
             echo "::error::Downloader failed (exit code $rc). Output above and in output/downloader-run.log"
             exit $rc
           fi
+
+          cd ..
+
 
 
       - name: Extract and prepare server files
