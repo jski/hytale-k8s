@@ -32,14 +32,12 @@ jobs:
           unzip -q hytale-downloader.zip
           chmod +x hytale-downloader-linux-amd64
 
-      - name: Write downloader credentials (canonical location)
+      - name: Write downloader credentials (current directory)
         shell: bash
         env:
           HYTALE_REFRESH_TOKEN: ${{ secrets.HYTALE_REFRESH_TOKEN }}
         run: |
           set -euo pipefail
-
-          : "${HOME:?HOME not set}"
 
           if [[ -z "${HYTALE_REFRESH_TOKEN:-}" ]]; then
             echo "::error::Missing HYTALE_REFRESH_TOKEN"
@@ -51,14 +49,32 @@ jobs:
             exit 1
           fi
 
-          # EXACT structure the downloader writes itself
+          # Write to CURRENT DIRECTORY, not HOME
+          # This is where the downloader actually looks for credentials
           printf '%s\n' \
             "{\"access_token\":\"\",\"refresh_token\":\"${HYTALE_REFRESH_TOKEN}\",\"expires_at\":0,\"branch\":\"release\"}" \
-            > "${HOME}/.hytale-downloader-credentials.json"
+            > .hytale-downloader-credentials.json
 
-          chmod 600 "${HOME}/.hytale-downloader-credentials.json"
+          chmod 600 .hytale-downloader-credentials.json
 
-          echo "Credentials written to ${HOME}/.hytale-downloader-credentials.json (token not shown)"
+          echo "Credentials written to $(pwd)/.hytale-downloader-credentials.json"
+          echo "Working directory: $(pwd)"
+
+      - name: Debug - Check credentials before downloader
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== DEBUG: Credentials file check BEFORE downloader ==="
+          echo "PWD=${PWD}"
+          
+          cred=".hytale-downloader-credentials.json"
+          if [[ -f "$cred" ]]; then
+            echo "✓ Credentials file exists at: $(pwd)/$cred"
+            echo "File size: $(stat -c%s "$cred" 2>/dev/null || stat -f%z "$cred" 2>/dev/null || echo 'unknown') bytes"
+            echo "Refresh token starts with: $(jq -r '.refresh_token // ""' "$cred" | cut -c1-20)..."
+          else
+            echo "✗ Credentials file NOT found at: $(pwd)/$cred"
+          fi
 
       - name: Get upstream version
         id: upstream
@@ -67,10 +83,11 @@ jobs:
           set -euo pipefail
 
           echo "Running downloader to get version..."
-
+          echo "Working directory: $(pwd)"
+          
+          # Downloader looks in current directory, not HOME
           set +e
           timeout 90s stdbuf -oL -eL \
-            env HOME="${HOME}" \
             ./hytale-downloader-linux-amd64 -print-version \
             2>&1 | tee downloader-version.log
           rc=${PIPESTATUS[0]}
@@ -79,12 +96,16 @@ jobs:
           # Save return code for later steps
           echo "${rc}" > /tmp/downloader_rc
 
+          echo "=== DEBUG: Full downloader output ==="
+          cat downloader-version.log
+          echo "=== END downloader output ==="
+
           if [[ $rc -eq 124 ]]; then
             echo "::error::Downloader timed out (would indicate device auth fallback)"
             exit 124
           fi
           if [[ $rc -ne 0 ]]; then
-            echo "::error::Downloader failed"
+            echo "::error::Downloader failed with exit code: $rc"
             exit $rc
           fi
 
@@ -98,6 +119,23 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Captured version: ${version}"
 
+      - name: Debug - Check credentials after downloader
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== DEBUG: Credentials file check AFTER downloader ==="
+          
+          cred=".hytale-downloader-credentials.json"
+          if [[ -f "$cred" ]]; then
+            echo "✓ Credentials file exists at: $(pwd)/$cred"
+            echo "File size: $(stat -c%s "$cred" 2>/dev/null || stat -f%z "$cred" 2>/dev/null || echo 'unknown') bytes"
+            echo "File contents (redacted):"
+            jq '{access_token: (.access_token | if . == "" then "EMPTY" else "SET" end), refresh_token: (.refresh_token | if . == "" then "EMPTY" elif . then (.[:20] + "...") else "NULL" end), expires_at, branch}' "$cred" || cat "$cred"
+          else
+            echo "✗ Credentials file NOT found at: $(pwd)/$cred"
+          fi
+
       - name: Persist rotated refresh token
         # CRITICAL: Run this even if previous step failed, as long as credentials file exists
         # The token may have already been rotated even if the downloader failed
@@ -108,7 +146,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cred="${HOME}/.hytale-downloader-credentials.json"
+          cred=".hytale-downloader-credentials.json"
           if [[ ! -f "$cred" ]]; then
             echo "::warning::No credentials file to persist"
             exit 0
@@ -166,11 +204,16 @@ jobs:
           set -euo pipefail
           mkdir -p output
           cd output
+          
+          # Copy credentials to output directory since we're changing directories
+          cp ../.hytale-downloader-credentials.json .hytale-downloader-credentials.json
 
           timeout 15m stdbuf -oL -eL \
-            env HOME="${HOME}" \
             ../hytale-downloader-linux-amd64 \
             2>&1 | tee downloader-run.log
+
+          # Copy updated credentials back to parent directory for persistence step
+          cp .hytale-downloader-credentials.json ../.hytale-downloader-credentials.json
 
           cd ..
 
@@ -183,7 +226,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cred="${HOME}/.hytale-downloader-credentials.json"
+          cred=".hytale-downloader-credentials.json"
           if [[ ! -f "$cred" ]]; then
             echo "::warning::No credentials file to persist"
             exit 0
