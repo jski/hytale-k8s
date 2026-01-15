@@ -2,7 +2,7 @@ name: Build Hytale Server Image
 
 on:
   push:
-    branches: [master]
+    branches: [master, bug/refresh-token-fix-again]
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
