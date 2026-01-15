@@ -118,6 +118,10 @@ jobs:
 
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Captured version: ${version}"
+          echo "::notice::Upstream version available in downloader: ${version}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            echo "Upstream version: ${version}" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Debug - Check credentials after downloader
         if: always()
@@ -183,6 +187,14 @@ jobs:
           set -euo pipefail
           version="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [[ -z "${version}" ]]; then
+            echo "::notice::Current release version not found"
+          else
+            echo "::notice::Current release version: ${version}"
+          fi
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            echo "Current release version: ${version}" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Determine if build is needed
         id: should_build
@@ -190,11 +202,23 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
+            echo "::notice::Decision: build=true (forced via workflow input)"
             echo "build=true" >> "$GITHUB_OUTPUT"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              printf '%s\n' "Decision: build=true (forced via workflow input)" >> "$GITHUB_STEP_SUMMARY"
+            fi
           elif [[ "${{ steps.current.outputs.version }}" == "${{ steps.upstream.outputs.version }}" ]]; then
+            echo "::notice::Decision: build=false (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})"
             echo "build=false" >> "$GITHUB_OUTPUT"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              printf '%s\n' "Decision: build=false (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})" >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
+            echo "::notice::Decision: build=true (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})"
             echo "build=true" >> "$GITHUB_OUTPUT"
+            if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+              printf '%s\n' "Decision: build=true (current=${{ steps.current.outputs.version }}, upstream=${{ steps.upstream.outputs.version }})" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
       - name: Download server files
