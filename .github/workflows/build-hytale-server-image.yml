@@ -69,26 +69,34 @@ jobs:
           set -euo pipefail
           echo "Running downloader to get version..."
 
+          # Fail fast if it hangs (likely waiting for interactive device auth).
+          # `stdbuf` makes output line-buffered so you can see progress in CI logs.
           set +e
-          ./hytale-downloader-linux-amd64 -print-version > downloader-version.log 2>&1
-          rc=$?
+          timeout 90s stdbuf -oL -eL ./hytale-downloader-linux-amd64 -print-version 2>&1 | tee downloader-version.log
+          rc=${PIPESTATUS[0]}
+          # timeout returns 124 when it kills the process
+          if [[ $rc -eq 124 ]]; then
+            echo "::error::Downloader timed out (likely waiting for interactive auth)."
+            echo "::error::Your refresh token may be invalid/rotated; re-auth and update HYTALE_REFRESH_TOKEN (or ensure rotation persistence step is working)."
+            exit 124
+          fi
           set -e
 
           if [[ $rc -ne 0 ]]; then
-            echo "::error::Downloader failed (exit code $rc). Full output below:"
-            sed -e 's/\r$//' downloader-version.log
+            echo "::error::Downloader failed (exit code $rc). Output above and also in downloader-version.log"
             exit $rc
           fi
 
           version="$(tail -n 1 downloader-version.log | tr -d '\r\n ')"
           if [[ -z "$version" ]]; then
-            echo "::error::Downloader succeeded but version was empty. Output:"
-            sed -e 's/\r$//' downloader-version.log
+            echo "::error::Downloader succeeded but version was empty. Full output:"
+            cat downloader-version.log
             exit 1
           fi
 
           echo "Captured version: ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+
 
       - name: Persist rotated refresh token back to repo secret
         if: success()
@@ -166,22 +174,20 @@ jobs:
         if: steps.should_build.outputs.build == 'true'
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p output
-          cd output
-
           set +e
-          ../hytale-downloader-linux-amd64 > downloader-run.log 2>&1
-          rc=$?
+          timeout 15m stdbuf -oL -eL ../hytale-downloader-linux-amd64 2>&1 | tee downloader-run.log
+          rc=${PIPESTATUS[0]}
+          if [[ $rc -eq 124 ]]; then
+            echo "::error::Downloader timed out. Output above and in output/downloader-run.log"
+            exit 124
+          fi
           set -e
 
           if [[ $rc -ne 0 ]]; then
-            echo "::error::Downloader failed (exit code $rc). Full output below:"
-            sed -e 's/\r$//' downloader-run.log
+            echo "::error::Downloader failed (exit code $rc). Output above and in output/downloader-run.log"
             exit $rc
           fi
 
-          cd ..
 
       - name: Extract and prepare server files
         if: steps.should_build.outputs.build == 'true'
