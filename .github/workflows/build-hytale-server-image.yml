@@ -16,12 +16,15 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       packages: write
+
     env:
       HOME: /home/runner
       XDG_CONFIG_HOME: /home/runner/.config
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,56 +42,92 @@ jobs:
           unzip -q hytale-downloader.zip
           chmod +x hytale-downloader-linux-amd64
 
-      - name: Setup OAuth credentials
+      - name: Setup OAuth credentials (refresh token)
         shell: bash
+        env:
+          HYTALE_REFRESH_TOKEN: ${{ secrets.HYTALE_REFRESH_TOKEN }}
         run: |
-          echo "Using HOME=${HOME}"
-          if [ -n "${{ secrets.HYTALE_DOWNLOADER_CREDENTIALS_B64 }}" ]; then
-            echo "${{ secrets.HYTALE_DOWNLOADER_CREDENTIALS_B64 }}" | base64 -d > ~/.hytale-downloader-credentials.json
-            echo "Using base64 credential secret"
-          else
-            echo "::error::No downloader credentials provided"
+          set -euo pipefail
+
+          if [[ -z "${HYTALE_REFRESH_TOKEN:-}" ]]; then
+            echo "::error::Missing required secret HYTALE_REFRESH_TOKEN"
             exit 1
           fi
 
-          chmod 600 ~/.hytale-downloader-credentials.json
-          mkdir -p ~/.config/hytale-downloader ~/.hytale-downloader
-          cp ~/.hytale-downloader-credentials.json ~/.config/hytale-downloader/credentials.json
-          cp ~/.hytale-downloader-credentials.json ~/.hytale-downloader/credentials.json
-          cp ~/.hytale-downloader-credentials.json "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json"
-          mkdir -p "${GITHUB_WORKSPACE}/.config/hytale-downloader"
-          cp ~/.hytale-downloader-credentials.json "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json"
+          # Create a minimal credentials file using ONLY the refresh token.
+          # (Access tokens are short-lived and should not be stored in GitHub Secrets.)
+          cred_json="$(mktemp)"
+          cat > "${cred_json}" <<EOF
+          {"refresh_token":"${HYTALE_REFRESH_TOKEN}"}
+          EOF
+          chmod 600 "${cred_json}"
 
-          python3 -c "import json; p='/home/runner/.hytale-downloader-credentials.json'; d=json.load(open(p)); t=d.get('refresh_token',''); print(f'Refresh token length: {len(t)}')"
+          echo "Using HOME=${HOME}"
+          echo "Using XDG_CONFIG_HOME=${XDG_CONFIG_HOME}"
+
+          # Place the credentials in the most likely locations the downloader will check.
+          # 1) Home-based file
+          cp "${cred_json}" "${HOME}/.hytale-downloader-credentials.json"
+          chmod 600 "${HOME}/.hytale-downloader-credentials.json"
+
+          # 2) XDG config path
+          mkdir -p "${XDG_CONFIG_HOME}/hytale-downloader"
+          cp "${cred_json}" "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
+          chmod 600 "${XDG_CONFIG_HOME}/hytale-downloader/credentials.json"
+
+          # Also keep a copy in workspace so later steps that cd can reuse it.
+          cp "${cred_json}" "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json"
+          mkdir -p "${GITHUB_WORKSPACE}/.config/hytale-downloader"
+          cp "${cred_json}" "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json"
+
+          # Minimal sanity output (no secrets)
+          python3 - <<'PY'
+          import json, os
+          paths = [
+              os.path.expanduser("~/.hytale-downloader-credentials.json"),
+              os.path.expanduser("~/.config/hytale-downloader/credentials.json"),
+          ]
+          for p in paths:
+              try:
+                  d = json.load(open(p))
+                  rt = d.get("refresh_token","")
+                  print(f"Credentials OK at {p} (refresh_token length={len(rt)})")
+              except Exception as e:
+                  print(f"Credentials NOT readable at {p}: {e}")
+          PY
 
       - name: Get upstream version
         id: upstream
         shell: bash
         run: |
+          set -euo pipefail
           echo "Running downloader to get version..."
-          ./hytale-downloader-linux-amd64 -print-version
-          version=$(./hytale-downloader-linux-amd64 -print-version 2>&1 | tail -n 1 | tr -d '\r\n ')
+          # This call requires auth because it fetches the manifest.
+          version="$(./hytale-downloader-linux-amd64 -print-version 2>&1 | tail -n 1 | tr -d '\r\n ')"
           echo "Captured version: ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Get current release version
         id: current
         shell: bash
-        run: |
-          version=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Current version: ${version:-none}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Current version: ${version:-none}"
 
       - name: Determine if build is needed
         id: should_build
         shell: bash
         run: |
-          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+          set -euo pipefail
+
+          if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
             echo "Build forced via workflow_dispatch"
-          elif [ "${{ steps.current.outputs.version }}" = "${{ steps.upstream.outputs.version }}" ]; then
+          elif [[ "${{ steps.current.outputs.version }}" == "${{ steps.upstream.outputs.version }}" ]]; then
             echo "build=false" >> "$GITHUB_OUTPUT"
             echo "Version unchanged (${{ steps.upstream.outputs.version }}), skipping build"
           else
@@ -100,27 +139,39 @@ jobs:
         if: steps.should_build.outputs.build == 'true'
         shell: bash
         run: |
+          set -euo pipefail
+
           echo "Using HOME=${HOME}"
           export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+
           mkdir -p output
           cd output
+
+          # Ensure creds are present in *this* working directory too (some tools look relative).
           cp "${GITHUB_WORKSPACE}/.hytale-downloader-credentials.json" ./ || true
           mkdir -p .config/hytale-downloader
           cp "${GITHUB_WORKSPACE}/.config/hytale-downloader/credentials.json" .config/hytale-downloader/credentials.json || true
+
+          # Run downloader (downloads server ZIP into ./output)
           ../hytale-downloader-linux-amd64
+
           cd ..
 
       - name: Extract and prepare server files
         if: steps.should_build.outputs.build == 'true'
         shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p stage package
-          latest_zip=$(ls -t output/*.zip | head -n 1)
+          latest_zip="$(ls -t output/*.zip | head -n 1)"
           unzip -q "$latest_zip" -d stage
+
           cp "$(find stage -name 'Assets.zip' -type f)" package/Assets.zip
           cp "$(find stage -name 'HytaleServer.jar' -type f)" package/HytaleServer.jar
           cp "$(find stage -name 'HytaleServer.aot' -type f)" package/HytaleServer.aot
           cp server/Dockerfile package/Dockerfile
+
           rm -rf stage output
 
       - name: Generate tags
@@ -128,8 +179,9 @@ jobs:
         id: tags
         shell: bash
         run: |
+          set -euo pipefail
           version="${{ steps.upstream.outputs.version }}"
-          timestamp=$(date -u +%Y%m%d-%H%M%S)
+          timestamp="$(date -u +%Y%m%d-%H%M%S)"
           echo "version_tag=v${version}" >> "$GITHUB_OUTPUT"
           echo "timestamp_tag=build-${timestamp}" >> "$GITHUB_OUTPUT"
 
@@ -165,25 +217,28 @@ jobs:
       - name: Create release
         if: steps.should_build.outputs.build == 'true'
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           notes_file="$(mktemp)"
-          printf '%s\n' \
-            "**Version:** ${{ steps.upstream.outputs.version }}" \
-            "**Built:** ${{ steps.tags.outputs.timestamp_tag }}" \
-            "" \
-            "### Docker Image" \
-            "```" \
-            "docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}" \
-            "```" \
-            "" \
-            "### Tags" \
-            "- \`latest\`" \
-            "- \`${{ steps.tags.outputs.version_tag }}\`" \
-            "- \`${{ steps.tags.outputs.timestamp_tag }}\`" \
-            > "${notes_file}"
+          {
+            printf '%s\n' \
+              "**Version:** ${{ steps.upstream.outputs.version }}" \
+              "**Built:** ${{ steps.tags.outputs.timestamp_tag }}" \
+              "" \
+              "### Docker Image" \
+              "```" \
+              "docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}" \
+              "```" \
+              "" \
+              "### Tags" \
+              "- \`latest\`" \
+              "- \`${{ steps.tags.outputs.version_tag }}\`" \
+              "- \`${{ steps.tags.outputs.timestamp_tag }}\`"
+          } > "${notes_file}"
 
           gh release create "${{ steps.tags.outputs.version_tag }}" \
             --title "Hytale Server ${{ steps.upstream.outputs.version }}" \
             --notes-file "${notes_file}"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
