@@ -112,7 +112,6 @@ jobs:
             exit 0
           fi
 
-          # Extract refresh_token from JSON without printing it
           new_rt="$(jq -r '.refresh_token // ""' "${cred_path}")"
 
           if [[ -z "${new_rt}" ]]; then
@@ -121,13 +120,17 @@ jobs:
           fi
 
           if [[ "${new_rt}" != ory_rt_* ]]; then
-            echo "::warning::refresh_token in ${cred_path} didn't look expected; skipping update."
+            echo "::warning::refresh_token did not look like expected value; skipping update."
             exit 0
           fi
 
-          # Update the repo secret (do not print the token)
-          echo "${new_rt}" | gh secret set HYTALE_REFRESH_TOKEN --repo "${GITHUB_REPOSITORY}" --body-file -
-          echo "Updated HYTALE_REFRESH_TOKEN from downloader credentials (token not displayed)."
+          # IMPORTANT: use stdin, not --body-file
+          echo "${new_rt}" | gh secret set HYTALE_REFRESH_TOKEN \
+            --repo "${GITHUB_REPOSITORY}" \
+            --body -
+
+          echo "Updated HYTALE_REFRESH_TOKEN (token not displayed)."
+
 
       - name: Get current release version
         id: current
