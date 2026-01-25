@@ -24,7 +24,7 @@ spec:
             type: File
       containers:
         - name: hytale
-          image: ghcr.io/jski/hytale-server:latest
+          image: ghcr.io/jski/hytale-server
           imagePullPolicy: Always
           stdin: true
           tty: true
