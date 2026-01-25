@@ -373,32 +373,36 @@ jobs:
         run: |
           set -euo pipefail
 
+          tag="${{ steps.tags.outputs.version_tag }}"
+          title="Hytale Server ${{ steps.upstream.outputs.version }}"
           notes_file="$(mktemp)"
-          {
-            printf '%s\n' \
-              "**Version:** ${{ steps.upstream.outputs.version }}" \
-              "**Built:** ${{ steps.tags.outputs.timestamp_tag }}" \
-              "" \
-              "### Docker Image" \
-              "```" \
-              "docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}" \
-              "```" \
-              "" \
-              "### Tags" \
-              "- \`latest\`" \
-              "- \`${{ steps.tags.outputs.version_tag }}\`" \
-              "- \`${{ steps.tags.outputs.timestamp_tag }}\`"
-          } > "${notes_file}"
+          cat > "${notes_file}" <<EOF
+          **Version:** ${{ steps.upstream.outputs.version }}
+          **Built:** ${{ steps.tags.outputs.timestamp_tag }}
+
+          ### Docker Image
+          ```
+          docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}
+          ```
+
+          ### Tags
+          - \`latest\`
+          - \`${{ steps.tags.outputs.version_tag }}\`
+          - \`${{ steps.tags.outputs.timestamp_tag }}\`
+          EOF
 
           set +e
-          gh release create "${{ steps.tags.outputs.version_tag }}" \
-            --title "Hytale Server ${{ steps.upstream.outputs.version }}" \
-            --notes-file "${notes_file}" 2> gh-release.err
+          if gh release view "${tag}" > /dev/null 2>&1; then
+            echo "Release ${tag} already exists; updating it"
+            gh release edit "${tag}" --title "${title}" --notes-file "${notes_file}" 2> gh-release.err
+          else
+            gh release create "${tag}" --title "${title}" --notes-file "${notes_file}" 2> gh-release.err
+          fi
           rc=$?
           set -e
 
           if [[ $rc -ne 0 ]]; then
-            echo "::error::Failed to create release (exit code $rc). gh output:"
+            echo "::error::Failed to create or update release (exit code $rc). gh output:"
             cat gh-release.err
             exit $rc
           fi
