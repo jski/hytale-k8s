@@ -7,4 +7,4 @@ resources:
   - service.yaml
 images:
   - name: ghcr.io/jski/hytale-server
-    newTag: v2026.01.27-734d39026
+    newTag: v2026.01.28-87d03be09
