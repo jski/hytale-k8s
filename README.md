@@ -36,7 +36,6 @@ services:
       - ./data:/hytale/data
     environment:
       JAVA_OPTS: "-Xms6G -Xmx6G"
-      AOT_OPTS: "-XX:AOTCache=/hytale/data/HytaleServer.aot"
     working_dir: /hytale/data
     command: >-
       sh -lc "exec java $JAVA_OPTS $AOT_OPTS -jar /hytale/HytaleServer.jar --assets /hytale/Assets.zip"
