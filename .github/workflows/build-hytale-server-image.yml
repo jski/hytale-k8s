@@ -106,7 +106,7 @@ jobs:
           fi
           if [[ $rc -ne 0 ]]; then
             echo "::error::Downloader failed with exit code: $rc"
-            exit $rc
+            exit "$rc"
           fi
 
           version="$(tail -n 1 downloader-version.log | tr -d '\r\n ')"
@@ -285,37 +285,86 @@ jobs:
 
           mkdir -p stage package
 
-          latest_zip="$(ls -t output/*.zip 2>/dev/null | head -n 1 || true)"
-          if [[ -z "$latest_zip" ]]; then
-            echo "::error::No ZIP found in output/. Listing output directory:"
-            ls -la output || true
-            echo "::error::Downloader may have succeeded but did not produce a ZIP. See output/downloader-run.log"
-            exit 1
-          fi
+          python - <<'PY'
+          import shutil
+          import sys
+          import zipfile
+          from pathlib import Path
 
-          unzip -q "$latest_zip" -d stage
+          output = Path("output")
+          stage = Path("stage")
+          package = Path("package")
 
-          require_one() {
-            local pattern="$1"
-            local desc="$2"
-            local found
-            found="$(find stage -name "$pattern" -type f | head -n 1 || true)"
-            if [[ -z "$found" ]]; then
-              echo "::error::Missing required artifact: ${desc} (pattern: ${pattern})"
-              echo "Stage contents:"
-              find stage -maxdepth 4 -type f | sed -e 's/^/  /' | head -n 200
-              exit 1
-            fi
-            echo "$found"
-          }
+          def rel(path):
+              return path.as_posix()
 
-          assets_zip="$(require_one 'Assets.zip' 'Assets.zip')"
-          server_jar="$(require_one 'HytaleServer.jar' 'HytaleServer.jar')"
-          server_aot="$(require_one 'HytaleServer.aot' 'HytaleServer.aot')"
+          def print_tree(root, limit=250):
+              if not root.exists():
+                  print(f"  {root}/ does not exist")
+                  return
+              files = sorted(path for path in root.rglob("*") if path.is_file())
+              for path in files[:limit]:
+                  print(f"  {rel(path)} ({path.stat().st_size} bytes)")
+              if len(files) > limit:
+                  print(f"  ... {len(files) - limit} more files omitted")
 
-          cp "$assets_zip" package/Assets.zip
-          cp "$server_jar" package/HytaleServer.jar
-          cp "$server_aot" package/HytaleServer.aot
+          archives = sorted(output.glob("*.zip"), key=lambda path: path.stat().st_mtime, reverse=True)
+          if not archives:
+              print("::error::No ZIP found in output/. Listing output directory:", file=sys.stderr)
+              print_tree(output)
+              print("::error::Downloader may have succeeded but did not produce a ZIP. See output/downloader-run.log", file=sys.stderr)
+              sys.exit(1)
+
+          latest_zip = archives[0]
+          print(f"Using downloaded archive: {rel(latest_zip)} ({latest_zip.stat().st_size} bytes)")
+
+          try:
+              with zipfile.ZipFile(latest_zip) as archive:
+                  members = [member for member in archive.infolist() if not member.is_dir()]
+                  print(f"Archive contains {len(members)} files. First entries:")
+                  for member in members[:200]:
+                      print(f"  {member.filename} ({member.file_size} bytes)")
+                  if len(members) > 200:
+                      print(f"  ... {len(members) - 200} more files omitted")
+                  archive.extractall(stage)
+          except zipfile.BadZipFile as exc:
+              print(f"::error::Downloaded archive is not a valid ZIP: {exc}", file=sys.stderr)
+              sys.exit(1)
+
+          files = sorted(path for path in stage.rglob("*") if path.is_file())
+
+          def find_required(output_name, exact_names, fallback_predicate=None):
+              exact = {name.lower() for name in exact_names}
+              exact_matches = [path for path in files if path.name.lower() in exact]
+              if exact_matches:
+                  source = exact_matches[0]
+              elif fallback_predicate:
+                  fallback_matches = [path for path in files if fallback_predicate(path)]
+                  if fallback_matches:
+                      source = fallback_matches[0]
+                  else:
+                      source = None
+              else:
+                  source = None
+
+              if source is None:
+                  print(f"::error::Missing required artifact for {output_name}", file=sys.stderr)
+                  print("Extracted contents:", file=sys.stderr)
+                  print_tree(stage)
+                  sys.exit(1)
+
+              destination = package / output_name
+              shutil.copy2(source, destination)
+              print(f"Prepared {output_name} from {rel(source)}")
+
+          find_required(
+              "Assets.zip",
+              ["Assets.zip"],
+              lambda path: path.suffix.lower() == ".zip" and "asset" in path.name.lower(),
+          )
+          find_required("HytaleServer.jar", ["HytaleServer.jar"])
+          find_required("HytaleServer.aot", ["HytaleServer.aot"])
+          PY
 
           if [[ ! -f server/Dockerfile ]]; then
             echo "::error::Missing server/Dockerfile in repo"
@@ -381,9 +430,8 @@ jobs:
           **Built:** ${{ steps.tags.outputs.timestamp_tag }}
 
           ### Docker Image
-          ```
-          docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}
-          ```
+
+              docker pull ghcr.io/${{ github.repository_owner }}/hytale-server:${{ steps.tags.outputs.version_tag }}
 
           ### Tags
           - \`latest\`
