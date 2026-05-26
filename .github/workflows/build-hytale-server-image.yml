@@ -363,7 +363,15 @@ jobs:
               lambda path: path.suffix.lower() == ".zip" and "asset" in path.name.lower(),
           )
           find_required("HytaleServer.jar", ["HytaleServer.jar"])
-          find_required("HytaleServer.aot", ["HytaleServer.aot"])
+
+          aot_config_matches = [
+              path for path in files if path.name.lower() == "hytaleserver.aot.config"
+          ]
+          if aot_config_matches:
+              shutil.copy2(aot_config_matches[0], package / "HytaleServer.aot.config")
+              print(f"Prepared HytaleServer.aot.config from {rel(aot_config_matches[0])}")
+          else:
+              print("No HytaleServer.aot.config found; continuing without bundled AOT config")
           PY
 
           if [[ ! -f server/Dockerfile ]]; then
